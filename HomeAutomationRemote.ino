@@ -1,17 +1,17 @@
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-// Remote controller project for a personal Home Automation System
-// Code by Guido Scognamiglio
+// Remote controller for "GSi Domotica", a personal Home Automation System by Guido Scognamiglio
 // Last update: May 2019
+// Version with 24H weather forecast
 //
 // Based on Arduino MKR 1010 WiFi and Zihatec Arduitouch MKR -> https://www.hwhardsoft.de/english/projects/arduitouch-mkr/
-// Uses libraries:
+// Uses:
 // - Adafruit GFX library for ILI9341 touch screen display
 // - WiFiNina for MKR1010 WiFi
 // - FlashStorage for storing data into the flash memory (ATSAM doesn't have its own EEPROM)
-// - ArduinoJson for parsing data downloaded from OpenWeatherMap
+// - ArduinoJson v6 for parsing data downloaded from OpenWeatherMap
 // - SimpleDHT for reading the DHT11 Temperature & Humidity sensor
-// - Extra Fonts from Online font converter: http://oleddisplay.squix.ch/#/home
+// - Font DSEG14_Classic_Bold_Italic_64 from Online font converter: http://oleddisplay.squix.ch/#/home
 // Requires:
 // - Access to a WiFi network
 // - An account on OpenWeatherMap
@@ -28,6 +28,7 @@
 #include <Fonts/DSEG14_Classic_Bold_Italic_64.h>
 #include <Fonts/DSEG14_Classic_Italic_36.h>
 #include <Fonts/Meteocons_Regular_48.h>
+#include <Fonts/Meteocons_Regular_24.h>
 #include <WiFiNINA.h>
 #include <WiFiUdp.h>
 #include <NTPClient.h>
@@ -49,44 +50,30 @@
 #define PIN_DHT11 A1
 #define PIN_HEATER_RELAY 3
 #define PIN_THERMOSTAT_REMOTE 4
+#define PIN_DISPLAY_TYPE A0 // read comments in setup()
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Configuration
-char ssid[] = "{type your SSID here}";
-char pass[] = "{type your password}";
-
-// Specify the IP of your Home Automation Server
-IPAddress HomeAutomationServer(24, 0, 0, 127);
-
-// Define a different NTP server if you're not in Italy
-#define NTP_SERVER "3.it.pool.ntp.org"
-
-// Seconds of inactivity before returning to the home page
-#define IDLE_TIME 6
-
-// Beep duration in Milliseconds
-#define BEEP_DURATION 50
-
-// Thermostat Hysteresis in Seconds
-#define THERMOSTAT_HYSTERESIS 20
-
+char ssid[] = "{your SSID here}";
+char pass[] = "{your password here}";
+IPAddress HomeAutomationServer(24,0,0,254); // Specify the IP to your Home Automation Server
+#define NTP_SERVER "3.it.pool.ntp.org" // Change to your preference
+#define IDLE_TIME 6 // Seconds of inactivity before returning to the home page
+#define BEEP_DURATION 50 // Milliseconds
+#define THERMOSTAT_HYSTERESIS 20 // Seconds
 // Considering the DHT sensor is located inside the enclosure, it will also capture the circuit's heat, while the actual envinronmental temperature might be lower.
 // Therefore a compensation is needed in order to have a reading closer to what's perceived 2 meters away from the circuit.
 // This value is a percentage of the actual reading from the sensor, to be added or subtracted, according to the sign.
 // In order to be set with accuracy, some comparison is needed possibly with an infrared thermometer, varying this value until the reading becomes stable and accurate.
 #define THERMOSTAT_OFFSET -14.f
-
 // These are days and monts in local language (Italian, in my case)
 const char *days[] = { "Domenica", "Lunedi", "Martedi", "Mercoledi", "Giovedi", "Venerdi", "Sabato" };
 const char *months[] = { "Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno", "Luglio", "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre" };
-
 // OpenWeatherMap account ID and City ID
-String OWM_APIKEY = "{register with OpenWeatherMap to get your Key}";
-String OWM_CITYID = "{see OWM API documentation to find your City ID}";
-
-// Weather forecast update in Seconds
-#define OWM_UDPATE_FREQ 3600 // 3600 seconds = 1 hour
+String OWM_APIKEY = "{your API key here}";
+String OWM_CITYID = "{your City ID here}";
+#define OWM_UDPATE_FREQ 3600 // Seconds
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -98,9 +85,9 @@ TouchEvent tevent(touch);
 
 // Wi-Fi
 WiFiClient client;
-int status = WL_IDLE_STATUS;
+int WiFistatus = WL_IDLE_STATUS;
 String PIN = "", pinEntry;
-String CRLF = "\015\012"; // "\x0D\x0A" // "\r\n" // "\13\10" // This is CARRIAGE RETURN + LINE FEED
+String CRLF = "\015\012"; // "\x0D\x0A" // "\r\n" // "\13\10" //
 
 // NTP Client for internet time
 WiFiUDP ntpUDP;
@@ -113,12 +100,8 @@ float Temperature, prev_Temperature;
 // Weather forecast service
 //char WeatherServer[] = "api.openweathermap.org";
 IPAddress WeatherServer(37,139,20,5);
-// Define a different Country Code if you want weather information in a different language
-String WeatherURL = "/data/2.5/forecast?id=" + OWM_CITYID + "&units=metric&cnt=1&lang=it&APPID=" + OWM_APIKEY;
 struct WeatherData
 {
-  //char location[32];
-  //char weather[32];
   char description[32];
   char iconID[4];
   float temp;
@@ -126,12 +109,19 @@ struct WeatherData
   float temp_min;
   float temp_max;
   float wind_speed;
-  //float wind_deg;
   float clouds;
   unsigned long LastTimeUpdated;
 } WeatherForecast;
-FlashStorage(WeatherStore, WeatherData);
 
+struct Weather24HData
+{
+  float temp;
+  float tmin;
+  float tmax;
+  unsigned long timestamp;
+  char  icon[4];
+  unsigned long LastTimeUpdated;
+} Forecast24H[8];
 
 // Other global variables and definitions
 #define SWBTN_TOP_Y   20
@@ -173,19 +163,19 @@ enum ePages
 {
   kPage_Home = 0,
   kPage_Config,
+  kPage_Forecast24H,
   kPage_Switches,
   kPage_Thermostat,
   kPage_Auth,
 };
 
 // Declare some prototypes with default values
-void UpdateKeyPad(int single = -1); // Pass a number 0~7 to redraw only a single button
+void UpdateKeyPad(int single = -1);
 void UpdateThermostat(int redraw = 3); // 1 = redraw only status, 2 = redraw only temp; 3 = redraw all
 String getFromHTTP(String URL, IPAddress server = HomeAutomationServer);
 
 // Code from: http://forum.arduino.cc/index.php?topic=329079.0
 // Zone is CET (GMT+1), DST starts last sunday of march at 2:00 and ends last sunday of october at 2:00 (3:00)
-// You should implement this function in a different way if you're in a different time zone
 bool CheckDST()
 {
   bool dst = false;
@@ -204,7 +194,6 @@ bool CheckDST()
   return dst;
 }
 
-// Compute an average float value
 class CalcAverage
 {
 #define AVERAGE_MAX 20
@@ -231,7 +220,7 @@ public:
   }
 } TempAverage, HumiAverage;
 
-// Used to catch the touches on buttons (TouchEvent library also has a similar function)
+// Used to catch the touches on buttons
 bool isIntersect( int Ax, int Ay, int Aw, int Ah,  int Bx, int By, int Bw, int Bh )
 {
   return
@@ -241,7 +230,6 @@ bool isIntersect( int Ax, int Ay, int Aw, int Ah,  int Bx, int By, int Bw, int B
     Ay + Ah > By;
 }
 
-// A DHT22 would be more precise, allows decimal readings and can be updated twice in a second...
 void ReadDHT11()
 {
   byte temp = 0;
@@ -250,9 +238,7 @@ void ReadDHT11()
   if ((err = dht11.read(&temp, &humi, NULL)) != SimpleDHTErrSuccess)
     return;
 
-  // Apply offset
-  float t = (float)temp / 100.f * (100.f + THERMOSTAT_OFFSET);
-
+  float t = (float)temp / 100.f * (100.f + THERMOSTAT_OFFSET); // Apply offset
   TempAverage.AddValue(t);
   HumiAverage.AddValue((float)humi);
 }
@@ -273,8 +259,10 @@ String getFromHTTP(String URL, IPAddress server)
 
     // Wait for client, apply a timeout
     unsigned long timeout = millis();
-    while (client.available() == 0) {
-        if (millis() - timeout > 2000) {
+    while (client.available() == 0)
+    {
+        if (millis() - timeout > 2000)
+        {
             client.stop();
             return "TIMEOUT";
         }
@@ -283,12 +271,10 @@ String getFromHTTP(String URL, IPAddress server)
     // Get response
     String Response = "";
     while (client.available())
-    	Response += (char)client.read();
+      Response += (char)client.read();
 
-    // Get just the HTML part, discard the HTTP header
-    String HTML = Response.substring(Response.indexOf(CRLF + CRLF) + 4, Response.length());
-
-    return HTML;
+    // Return just the HTML part, discard the HTTP header
+    return Response.substring(Response.indexOf(CRLF + CRLF) + 4, Response.length());
   }
 
   return "OFFLINE";
@@ -301,15 +287,31 @@ String getFromHTTP(String URL, IPAddress server)
 // Function that defines the HTTP call to check the authorization
 void CheckLogin()
 {
-  String res; // Stores the response from the Server to check if the PIN is valid
+  // This should be the URL to your automation server to check for the correct pin
+  // Or you should implement your own login system...
+  String URL = "";
+  String HTML = getFromHTTP(URL);
 
-  // TO DO...
-  // Here you should define the call to your Server to check for the login...
+  if (HTML == "TIMEOUT" || HTML == "OFFLINE")
+  {
+    tft.fillScreen(0);
+    tft.setCursor(10, 120);
+    tft.setFont(&FreeSans9pt7b);
+    tft.setTextColor(ILI9341_WHITE);
+    tft.print("Server non raggiungibile!"); // "Server unreachable"
+    tone(PIN_BEEPER, 880, 500);
+    delay(1000);
+    draw_screen(kPage_Home);
+    return;
+  }
 
-  if (res == "1")
+  // Login accepted...
+  if (HTML == "1")
   {
     PIN = pinEntry;
     draw_screen(kPage_Switches);
+
+  // Login refused...
   } else {
     tft.fillScreen(0);
     tft.setCursor(0, 140);
@@ -325,23 +327,27 @@ void CheckLogin()
 // Function that defines the HTTP calls to operate the switches
 void DoSwitch(int button)
 {
-   // TO DO...
-   // Here you should write your own function that sends the controls to your Home Automation Server
-
+	// To do...
+	// Implement your own function to send commands to your automation server
 }
 
 // Called to get the configuration of all relay switches from the server
-void GetSwitchConfig()
+bool GetSwitchConfig()
 {
-	// TO DO...
-	// Here you should write your own function to gather the switch informations from your Home Automation Server
-	// and assign values to these variables:
+	// To do...
+	// Implement your own function to retrieve the relay configuration from your server
+	// and assign values to these variables...
+
+  for (int r=0; r<8; ++r)
+  {
     // Switch[r].Name
     // Switch[r].Hidden
     // Switch[r].AskConfirm
     // Switch[r].Type
     // Switch[r].Status
+  }
 
+  return true;
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -501,12 +507,21 @@ void onClick(TS_Point p)
 {
   tone(PIN_BEEPER, 1760, BEEP_DURATION);
 
+  // Reboot as soon as the display is touched in case the WiFi connection is lost
+  if (WiFi.status() != WL_CONNECTED)
+    NVIC_SystemReset();
+
   switch(Page)
   {
     case kPage_Home:
       // Touch the temperature area, go to thermostat page
       if (isIntersect(p.x, p.y, 1, 1, 200, 170, 120, 70))
         draw_screen(kPage_Thermostat);
+
+      // Touch the weather area
+      else
+      if (isIntersect(p.x, p.y, 1, 1, 0, 140, 200, 200))
+        draw_screen(kPage_Forecast24H);
 
       // Touch elsewhere
       else
@@ -531,13 +546,15 @@ void onClick(TS_Point p)
       IdleTimer = IDLE_TIME;
       break;
 
-    // The configuration page has not been implemented at all...
     case kPage_Config:
+      break;
+
+    case kPage_Forecast24H:
+      draw_screen(kPage_Home);
       break;
   }
 }
 
-// Not used...
 void onDblClick(TS_Point p)
 {
 }
@@ -545,7 +562,7 @@ void onDblClick(TS_Point p)
 void onLongClick(TS_Point p)
 {
   // Reset after a long click in the home screen
-  if (Page == kPage_Home) NVIC_SystemReset();
+  if (Page <= kPage_Home) NVIC_SystemReset();
 }
 
 /*
@@ -586,19 +603,24 @@ void draw_screen(int pg)
       tft.fillScreen(0);
       tft.setFont(&FreeSans9pt7b);
       tft.setTextColor(ILI9341_WHITE, ILI9341_BLACK);
-      tft.setCursor(10,140);
+      tft.setCursor(10, 120);
       tft.print("Ricezione della configurazione..."); // "Downloading configuration"
-      GetSwitchConfig();
-
-      tft.fillScreen(0);
-      UpdateStatusBar();
-      UpdateKeyPad();
+      if (GetSwitchConfig())
+      {
+        tft.fillScreen(0);
+        UpdateStatusBar();
+        UpdateKeyPad();
+      }
       break;
 
     case kPage_Thermostat:
       tft.fillScreen(0);
       UpdateStatusBar();
       UpdateThermostat();
+      break;
+
+    case kPage_Forecast24H:
+      Show24Forecast();
       break;
 
     // To do...
@@ -609,7 +631,7 @@ void draw_screen(int pg)
 }
 
 // Draws the 8 switch buttons
-void UpdateKeyPad(int single) // default = -1
+void UpdateKeyPad(int single)// = -1)
 {
   tft.setFont(&FreeSans9pt7b);
 
@@ -640,6 +662,41 @@ void UpdateKeyPad(int single) // default = -1
   }
 }
 
+// See: https://openweathermap.org/weather-conditions
+String GetWeatherIcon(String s)
+{
+  if (s.length() > 3) return "";
+
+  // clear sky
+  if (s == "01d") return("1");
+  if (s == "01n") return("2");
+
+  // few clouds
+  if (s == "02d") return("3");
+  if (s == "02n") return("4");
+
+  // scattered clouds
+  if (s.toInt() == 3) return("5");
+
+  // broken clouds
+  if (s.toInt() == 4) return("Y");
+
+  // shower rain
+  if (s.toInt() == 9) return("R");
+
+  // rain
+  if (s.toInt() == 10) return("8");
+
+  // thunderstorm
+  if (s.toInt() == 11) return("6");
+
+  // snow
+  if (s.toInt() == 13) return("W");
+
+  // mist
+  if (s.toInt() == 50) return("M");
+}
+
 void drawWeatherInfo()
 {
   if (WeatherForecast.LastTimeUpdated <= 0) return;
@@ -664,72 +721,140 @@ void drawWeatherInfo()
   sprintf(line, "Vento: %3.1f km/h", WeatherForecast.wind_speed * 1.852f); // Knots to Km/h
   tft.setCursor(4, 238); tft.print(line);
 
-  // Draw icon... See: https://openweathermap.org/weather-conditions
-  // Idea: since this is a font, each icon could have its own color... i.e.: the sun could be yellow, the moon could be blue...
+  // Draw icon...
   tft.fillRect(240, 20, 80, 80, 0);
   tft.setFont(&Meteocons_Regular_48);
   tft.setCursor(260, 90);
-
-  // clear sky
-  if (String(WeatherForecast.iconID) == "01d") tft.print("1");
-  if (String(WeatherForecast.iconID) == "01n") tft.print("2");
-
-  // few clouds
-  if (String(WeatherForecast.iconID) == "02d") tft.print("3");
-  if (String(WeatherForecast.iconID) == "02n") tft.print("4");
-
-  // scattered clouds
-  if (String(WeatherForecast.iconID).toInt() == 3) tft.print("5");
-
-  // broken clouds
-  if (String(WeatherForecast.iconID).toInt() == 4) tft.print("Y");
-
-  // shower rain
-  if (String(WeatherForecast.iconID).toInt() == 9) tft.print("R");
-
-  // rain
-  if (String(WeatherForecast.iconID).toInt() == 10) tft.print("8");
-
-  // thunderstorm
-  if (String(WeatherForecast.iconID).toInt() == 11) tft.print("6");
-
-  // snow
-  if (String(WeatherForecast.iconID).toInt() == 13) tft.print("W");
-
-  // mist
-  if (String(WeatherForecast.iconID).toInt() == 50) tft.print("M");
+  tft.print(GetWeatherIcon(WeatherForecast.iconID));
 }
 
 void getOpenWeatherMap()
 {
+  // Query string parameter cnt=1 downloads only one out of 40 array entries, which is the weather situation in the next 3 hours
+  String WeatherURL = "/data/2.5/forecast?id=" + OWM_CITYID + "&units=metric&cnt=1&lang=it&APPID=" + OWM_APIKEY;
   String result = getFromHTTP(WeatherURL, WeatherServer);
 
-  result.replace('[', ' ');
-  result.replace(']', ' ');
-
-  char jsonArray[result.length() + 1];
-  result.toCharArray(jsonArray, sizeof(jsonArray));
-  jsonArray[result.length() + 1] = '\0';
-
-  StaticJsonBuffer<1024> json_buf;
-  JsonObject &root = json_buf.parseObject(jsonArray);
-  if (!root.success())
+  if (result == "TIMEOUT" || result == "OFFLINE")
     return;
 
-  //sprintf(WeatherForecast.location, "%s", (const char*)root["city"]["name"]);
-  //sprintf(WeatherForecast.weather, "%s", (const char*)root["list"]["weather"]["main"]);
-  sprintf(WeatherForecast.description, "%s", (const char*)root["list"]["weather"]["description"]);
-  sprintf(WeatherForecast.iconID, "%s", (const char*)root["list"]["weather"]["icon"]);
-  WeatherForecast.temp = (float)root["list"]["main"]["temp"];
-  WeatherForecast.humi = (float)root["list"]["main"]["humidity"];
-  WeatherForecast.temp_min = (float)root["list"]["main"]["temp_min"];
-  WeatherForecast.temp_max = (float)root["list"]["main"]["temp_max"];
-  WeatherForecast.wind_speed = (float)root["list"]["wind"]["speed"];
-  //WeatherForecast.wind_deg = (float)root["list"]["wind"]["deg"];
-  WeatherForecast.clouds = (float)root["list"]["clouds"]["all"];
-  WeatherForecast.LastTimeUpdated = timeClient.getEpochTime();
+  // Computed from: https://arduinojson.org/v6/assistant/
+  const size_t capacity = 2*JSON_ARRAY_SIZE(1) + 3*JSON_OBJECT_SIZE(1) + 2*JSON_OBJECT_SIZE(2) + 2*JSON_OBJECT_SIZE(4) + JSON_OBJECT_SIZE(5) + 2*JSON_OBJECT_SIZE(8) + 330;
+  DynamicJsonDocument doc(capacity);
+  deserializeJson(doc, result);
+  JsonArray list = doc["list"];
 
-  WeatherStore.write(WeatherForecast);
+  sprintf(WeatherForecast.description, "%s", (const char*)list[0]["weather"][0]["description"]);
+  sprintf(WeatherForecast.iconID, "%s", (const char*)list[0]["weather"][0]["icon"]);
+  WeatherForecast.temp = (float)list[0]["main"]["temp"];
+  WeatherForecast.humi = (float)list[0]["main"]["humidity"];
+  WeatherForecast.temp_min = (float)list[0]["main"]["temp_min"];
+  WeatherForecast.temp_max = (float)list[0]["main"]["temp_max"];
+  WeatherForecast.wind_speed = (float)list[0]["wind"]["speed"];
+  WeatherForecast.clouds = (float)list[0]["clouds"]["all"];
+  WeatherForecast.LastTimeUpdated = timeClient.getEpochTime();
+}
+
+void Get24HForecast()
+{
+  // Query string parameter cnt=8 downloads only 8 out of 40 array entries, which is the next 24 hours (one update every 3 hours)
+  String WeatherURL = "/data/2.5/forecast?id=" + OWM_CITYID + "&units=metric&cnt=8&lang=it&APPID=" + OWM_APIKEY;
+  String result = getFromHTTP(WeatherURL, WeatherServer);
+
+  if (result == "TIMEOUT" || result == "OFFLINE")
+    return;
+
+  // Computed from: https://arduinojson.org/v6/assistant/
+  const size_t capacity = 8*JSON_ARRAY_SIZE(1) + JSON_ARRAY_SIZE(8) + 23*JSON_OBJECT_SIZE(1) + 9*JSON_OBJECT_SIZE(2) + 9*JSON_OBJECT_SIZE(4) + JSON_OBJECT_SIZE(5) + JSON_OBJECT_SIZE(7) + 15*JSON_OBJECT_SIZE(8) + 1930;
+  DynamicJsonDocument doc(capacity);
+  deserializeJson(doc, result);
+  JsonArray list = doc["list"];
+
+  for (int h=0; h<8; ++h)
+  {
+    Forecast24H[h].temp = (float)list[h]["main"]["temp"];
+    Forecast24H[h].tmin = (float)list[h]["main"]["temp_min"];
+    Forecast24H[h].tmax = (float)list[h]["main"]["temp_max"];
+    Forecast24H[h].timestamp = (unsigned long)list[h]["dt"];
+    sprintf(Forecast24H[h].icon, "%s", (const char*)list[h]["weather"][0]["icon"]);
+  }
+  Forecast24H[0].LastTimeUpdated = timeClient.getEpochTime();
+}
+
+void Show24Forecast()
+{
+  // Check if it's time to update the weather forecast
+  if (timeClient.getEpochTime() - Forecast24H[0].LastTimeUpdated >= OWM_UDPATE_FREQ)
+  {
+    tft.fillScreen(0);
+    tft.setFont(&FreeSans9pt7b);
+    tft.setTextColor(ILI9341_WHITE);
+    tft.setCursor(0, 120);
+    tft.print("Ricezione dati meteo..."); // "Download weather informations..."
+    Get24HForecast();
+  }
+
+  tft.fillScreen(0); //tft.color565(32, 128, 160)
+  UpdateStatusBar();
+  char txt[8];
+
+  // Draw scale
+  tft.setTextColor(tft.color565(128, 128, 128));
+  tft.setFont();
+  for (int h=0; h<8; ++h)
+  {
+    int y = 80 + h * 20;
+    int g = 50 - h * 10;
+    tft.setCursor(10, y-3);
+    sprintf(txt, "%+02d", g);
+    tft.print(txt);
+    tft.drawLine(30, y, 320, y, tft.color565(80, 80, 80));
+  }
+
+  // Draw histograms
+  for (int h=0; h<8; ++h)
+  {
+    int x = 40 + h * 35;
+    int y1 = 180 - (int)Forecast24H[h].temp * 2;
+    int y2 = 180 - (int)Forecast24H[h].tmin * 2;
+    int y3 = 180 - (int)Forecast24H[h].tmax * 2;
+
+    // Draw icon...
+    tft.setTextColor(ILI9341_WHITE);
+    tft.setFont(&Meteocons_Regular_24);
+    tft.setCursor(x, 70);
+    tft.print(GetWeatherIcon(Forecast24H[h].icon));
+
+    // Print max temperature
+    tft.setTextColor(ILI9341_WHITE);
+    tft.setFont();
+    tft.setCursor(x+1, y1 - 10);
+    sprintf(txt, "%02.1f", Forecast24H[h].tmax);
+    tft.print(txt);
+
+    // Draw current temperature
+    tft.fillRect(x, y1, 25, 230-y1, tft.color565(128, 128, 128));
+
+    // Print min temperature
+    tft.setTextColor(ILI9341_YELLOW);
+    tft.setCursor(x+1, y2 + 10);
+    sprintf(txt, "%02.1f", Forecast24H[h].tmin);
+    tft.print(txt);
+
+    // Print time
+    sprintf(txt, "%02d:%02d", (Forecast24H[h].timestamp % 86400L) / 3600, (Forecast24H[h].timestamp % 3600) / 60);
+    tft.setTextColor(ILI9341_WHITE);
+    tft.setCursor(x-2, 231);
+    tft.print(txt);
+
+    // Draw min & max lines
+    if (h < 7)
+    {
+      int y2b = 180 - (int)Forecast24H[h+1].tmin * 2;
+      int y3b = 180 - (int)Forecast24H[h+1].tmax * 2;
+      tft.drawLine(x, y2+1, x + 35, y2b+1, ILI9341_BLUE);
+      tft.drawLine(x, y3, x + 35, y3b, ILI9341_RED);
+    }
+  }
 }
 
 void UpdateDateString()
@@ -751,8 +876,8 @@ void UpdateHomePage()
   tft.setCursor(116, 96);
   tft.print(":");
 
-  // Get the current temperature
-  Temperature = TempAverage.GetAverage();
+  // Get temperature from the DHT sensor and apply the offset
+  Temperature = TempAverage.GetAverage();// / 100.f * (100.f + THERMOSTAT_OFFSET); // Apply offset
 
   // Update time every minute
   char now[16]; sprintf(now, "%02d:%02d", timeClient.getHours(), timeClient.getMinutes());
@@ -856,13 +981,14 @@ void LoginPage()
     {
       x = c * 64;
       tft.fillRoundRect(x, y, 64-1, 64-1, 16, ILI9341_WHITE);
+      //tft.drawRoundRect(x, y, 64-1, 64-1, 16, ILI9341_PURPLE);
       tft.setCursor(x+18, y + 46);
       tft.print(n++);
     }
   }
 }
 
-void UpdateThermostat(int redraw) // default = 3
+void UpdateThermostat(int redraw)
 {
   // Status button
   if (redraw & 1) // 1||3
@@ -893,32 +1019,6 @@ void UpdateThermostat(int redraw) // default = 3
   }
 }
 
-// Code From: https://stackoverflow.com/questions/9072320/split-string-into-string-array
-String getValue(String data, char separator, int index)
-{
-  int found = 0;
-  int strIndex[] = {0, -1};
-  int maxIndex = data.length()-1;
-
-  for(int i=0; i<=maxIndex && found<=index; i++){
-    if(data.charAt(i)==separator || i==maxIndex){
-        found++;
-        strIndex[0] = strIndex[1]+1;
-        strIndex[1] = (i == maxIndex) ? i+1 : i;
-    }
-  }
-
-  return found>index ? data.substring(strIndex[0], strIndex[1]) : "";
-}
-/*
-void TftLog(String txt)
-{
-  tft.setFont();
-  tft.setTextColor(ILI9341_WHITE, ILI9341_BLACK);
-  tft.setCursor(2, 230);
-  tft.print(txt);
-}
-*/
 
 void WiFiConnect()
 {
@@ -928,17 +1028,28 @@ void WiFiConnect()
   tft.setCursor(10, 120);
   tft.print("Connessione in corso..."); // "Connecting to server..."
 
+  int attempts = 3;
   // Attempt to connect to Wifi network:
-  while (status != WL_CONNECTED)
+  while (WiFistatus != WL_CONNECTED)
   {
-    status = WiFi.begin(ssid, pass);
+    WiFistatus = WiFi.begin(ssid, pass);
     delay(1000);
+    if (--attempts <= 0)
+    {
+      tft.fillRect(0, 100, 320, 40, 0);
+      tft.setCursor(10, 120);
+      tft.print("Rete Wi-Fi non raggiungibile"); // "Unable to connect to Wi-Fi network"
+      break;
+    }
   }
 }
 
 void setup()
 {
-  // Beeper output pin
+  SecondTimer = 0;
+  IdleTimer = 0;
+  TempAverage.Init();
+  HumiAverage.Init();
   pinMode(PIN_BEEPER, OUTPUT);
 
   // Init display
@@ -946,12 +1057,34 @@ void setup()
   tft.setRotation(1);
   tft.fillScreen(0);
 
+  // If the X coordinates of the touch sensor respond reversed, tie A0 to ground
+  pinMode(PIN_DISPLAY_TYPE, INPUT_PULLUP);
+
   // Turn backlight on
   pinMode(TFT_LED, OUTPUT);
   digitalWrite(TFT_LED, LOW);
 
+  // Init TouchEvent instance
+  touch.begin();
+  if (digitalRead(PIN_DISPLAY_TYPE) == HIGH)
+    tevent.setResolution(tft.width(), tft.height());    // Normal display
+  else
+    tevent.setResolution(-tft.width(), tft.height());   // Touch sensor with X axis reversed
+  tevent.setDblClick(300);
+  tevent.registerOnTouchClick(onClick);
+  tevent.registerOnTouchDblClick(onDblClick);
+  tevent.registerOnTouchLong(onLongClick);
+  //tevent.registerOnTouchSwipe(onSwipe);
+
   // Start WiFi connection
   WiFiConnect();
+  if (WiFi.status() != WL_CONNECTED)
+  {
+    tone(PIN_BEEPER, 880, 1000);
+    Page = -1;
+    // Skip the rest of the initialization
+    return;
+  }
 
   // Start NTP Client
   timeClient.begin();
@@ -959,11 +1092,8 @@ void setup()
   timeClient.setTimeOffset(CheckDST() ? 3600*2 : 3600); // 3600 is Timezone CET (GMT+1)
 
   // Setup Weather forecast service
-  WeatherForecast = WeatherStore.read();
-  Serial1.println(WeatherForecast.LastTimeUpdated);
-  if (timeClient.getEpochTime() - WeatherForecast.LastTimeUpdated >= OWM_UDPATE_FREQ)
-    if (WeatherForecast.LastTimeUpdated > 0)
-      getOpenWeatherMap();
+  Forecast24H[0].LastTimeUpdated = WeatherForecast.LastTimeUpdated = 0;
+  getOpenWeatherMap();
 
   // Setup thermostat
   Thermostat = ThermostatStore.read();
@@ -975,21 +1105,6 @@ void setup()
   pinMode(PIN_THERMOSTAT_REMOTE, INPUT_PULLUP);
   prev_Temperature = 0;
 
-  // Init TouchEvent instance
-  touch.begin();
-  tevent.setResolution(tft.width(), tft.height());
-  tevent.setDblClick(300);
-  tevent.registerOnTouchClick(onClick);
-  tevent.registerOnTouchDblClick(onDblClick);
-  tevent.registerOnTouchLong(onLongClick);
-  //tevent.registerOnTouchSwipe(onSwipe);
-
-  SecondTimer = 0;
-  IdleTimer = 0;
-
-  TempAverage.Init();
-  HumiAverage.Init();
-
   // Start with home page
   draw_screen(kPage_Home);
   tone(PIN_BEEPER, 1760, BEEP_DURATION);
@@ -998,6 +1113,10 @@ void setup()
 void loop()
 {
   tevent.pollTouchScreen();
+
+  // Nothing to do here if there's no WiFi connection...
+  if (WiFi.status() != WL_CONNECTED)
+    return;
 
   // This is a timer that should update every second
   if ((millis() - SecondTimer) >= 1000)
