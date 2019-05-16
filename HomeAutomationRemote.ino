@@ -2,16 +2,19 @@
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Remote controller for "GSi Domotica", a personal Home Automation System by Guido Scognamiglio
 // Last update: May 2019
-// Version with 24H weather forecast
+// Version with 24H weather forecast + 5 Day forecast
 //
 // Based on Arduino MKR 1010 WiFi and Zihatec Arduitouch MKR -> https://www.hwhardsoft.de/english/projects/arduitouch-mkr/
+//
 // Uses:
 // - Adafruit GFX library for ILI9341 touch screen display
 // - WiFiNina for MKR1010 WiFi
 // - FlashStorage for storing data into the flash memory (ATSAM doesn't have its own EEPROM)
-// - ArduinoJson v6 for parsing data downloaded from OpenWeatherMap
+// - ArduinoJson for parsing data downloaded from OpenWeatherMap
+// - JsonStreamingParser for parsing the 5-day forecast which would require much more RAM than the MKR board has
 // - SimpleDHT for reading the DHT11 Temperature & Humidity sensor
 // - Font DSEG14_Classic_Bold_Italic_64 from Online font converter: http://oleddisplay.squix.ch/#/home
+//
 // Requires:
 // - Access to a WiFi network
 // - An account on OpenWeatherMap
@@ -25,15 +28,17 @@
 #include "TouchEvent.h"
 #include <Fonts/FreeSans9pt7b.h>
 #include <Fonts/FreeSansBold24pt7b.h>
-#include <Fonts/DSEG14_Classic_Bold_Italic_64.h>
-#include <Fonts/DSEG14_Classic_Italic_36.h>
-#include <Fonts/Meteocons_Regular_48.h>
-#include <Fonts/Meteocons_Regular_24.h>
+#include "Fonts/DSEG14_Classic_Bold_Italic_64.h"
+#include "Fonts/DSEG14_Classic_Italic_36.h"
+#include "Fonts/Meteocons_Regular_48.h"
+#include "Fonts/Meteocons_Regular_24.h"
 #include <WiFiNINA.h>
 #include <WiFiUdp.h>
 #include <NTPClient.h>
 #include <SimpleDHT.h>
 #include <ArduinoJson.h>
+#include "JsonStreamingParser.h"
+#include "JsonListener.h"
 #include <FlashStorage.h>
 
 // PIN definitions
@@ -123,6 +128,19 @@ struct Weather24HData
   unsigned long LastTimeUpdated;
 } Forecast24H[8];
 
+struct Weather5DData
+{
+  float temp[8];
+  float humi[8];
+  float tmin;
+  float tmax;
+  float avgh;
+  char  icon[4];
+  int   nday;
+  unsigned long LastTimeUpdated;
+} Forecast5D[6];
+
+
 // Other global variables and definitions
 #define SWBTN_TOP_Y   20
 #define SWBTN_WIDTH   160
@@ -164,6 +182,7 @@ enum ePages
   kPage_Home = 0,
   kPage_Config,
   kPage_Forecast24H,
+  kPage_Forecast5D,
   kPage_Switches,
   kPage_Thermostat,
   kPage_Auth,
@@ -194,6 +213,7 @@ bool CheckDST()
   return dst;
 }
 
+// Class to compute the continuous average of values in a cycling array
 class CalcAverage
 {
 #define AVERAGE_MAX 20
@@ -327,16 +347,16 @@ void CheckLogin()
 // Function that defines the HTTP calls to operate the switches
 void DoSwitch(int button)
 {
-	// To do...
-	// Implement your own function to send commands to your automation server
+  // To do...
+  // Implement your own function to send commands to your automation server
 }
 
 // Called to get the configuration of all relay switches from the server
 bool GetSwitchConfig()
 {
-	// To do...
-	// Implement your own function to retrieve the relay configuration from your server
-	// and assign values to these variables...
+  // To do...
+  // Implement your own function to retrieve the relay configuration from your server
+  // and assign values to these variables...
 
   for (int r=0; r<8; ++r)
   {
@@ -550,6 +570,10 @@ void onClick(TS_Point p)
       break;
 
     case kPage_Forecast24H:
+      draw_screen(kPage_Forecast5D);
+      break;
+
+    case kPage_Forecast5D:
       draw_screen(kPage_Home);
       break;
   }
@@ -620,7 +644,11 @@ void draw_screen(int pg)
       break;
 
     case kPage_Forecast24H:
-      Show24Forecast();
+      Show24HForecast();
+      break;
+
+    case kPage_Forecast5D:
+      Show5DForecast();
       break;
 
     // To do...
@@ -730,7 +758,7 @@ void drawWeatherInfo()
 
 void getOpenWeatherMap()
 {
-  // Query string parameter cnt=1 downloads only one out of 40 array entries, which is the weather situation in the next 3 hours
+  // Query string parameter cnt=1 downloads only one array item out of 40, which is the weather situation in the next 3 hours
   String WeatherURL = "/data/2.5/forecast?id=" + OWM_CITYID + "&units=metric&cnt=1&lang=it&APPID=" + OWM_APIKEY;
   String result = getFromHTTP(WeatherURL, WeatherServer);
 
@@ -756,7 +784,7 @@ void getOpenWeatherMap()
 
 void Get24HForecast()
 {
-  // Query string parameter cnt=8 downloads only 8 out of 40 array entries, which is the next 24 hours (one update every 3 hours)
+  // Query string parameter cnt=8 downloads only 8 out of 40 possible array items, which is the next 24 hours (one update every 3 hours)
   String WeatherURL = "/data/2.5/forecast?id=" + OWM_CITYID + "&units=metric&cnt=8&lang=it&APPID=" + OWM_APIKEY;
   String result = getFromHTTP(WeatherURL, WeatherServer);
 
@@ -780,7 +808,7 @@ void Get24HForecast()
   Forecast24H[0].LastTimeUpdated = timeClient.getEpochTime();
 }
 
-void Show24Forecast()
+void Show24HForecast()
 {
   // Check if it's time to update the weather forecast
   if (timeClient.getEpochTime() - Forecast24H[0].LastTimeUpdated >= OWM_UDPATE_FREQ)
@@ -793,7 +821,7 @@ void Show24Forecast()
     Get24HForecast();
   }
 
-  tft.fillScreen(0); //tft.color565(32, 128, 160)
+  tft.fillScreen(0);
   UpdateStatusBar();
   char txt[8];
 
@@ -831,7 +859,7 @@ void Show24Forecast()
     sprintf(txt, "%02.1f", Forecast24H[h].tmax);
     tft.print(txt);
 
-    // Draw current temperature
+    // Draw temperature bar
     tft.fillRect(x, y1, 25, 230-y1, tft.color565(128, 128, 128));
 
     // Print min temperature
@@ -854,6 +882,273 @@ void Show24Forecast()
       tft.drawLine(x, y2+1, x + 35, y2b+1, ILI9341_BLUE);
       tft.drawLine(x, y3, x + 35, y3b, ILI9341_RED);
     }
+  }
+}
+
+// Custom parser for the JSON Steam coming from OpenWeatherMap
+class OWMListener : public JsonListener
+{
+public:
+  void Init()
+  {
+    d = -1;
+    h = 0;
+    prev_day = -1;
+    _count = 0;
+  }
+
+  // Get the key name
+  virtual void key(String k)
+  {
+    last_key = k;
+  }
+
+  // Get the key value
+  virtual void value(String v)
+  {
+    if (last_key == "")
+    {
+      delay(5);
+      return;
+    }
+
+    // Funny fancy animation of random colored dots that appear while the values are parsed from the json stream
+    tft.setCursor(10 + random(310), 10 + random(230));
+    tft.setTextColor(tft.color565(32 + random(223), 32 + random(223), 32 + random(223)));
+    tft.print(".");
+
+    if (last_key == "dt")
+    {
+      _count++;
+
+      // Get the timestamp, calc the day and hour
+      unsigned long timestamp = (unsigned long)v.toInt();
+      int _day = ((timestamp / 86400L) + 4 ) % 7; // 0 is Sunday
+      _hour = (timestamp % 86400L) / 3600;
+
+      // If it's a new day, shift to next day and reset daily forecast
+      if (prev_day != _day)
+      {
+        d++;
+        h = 0;
+        Forecast5D[d].nday = _day;
+        prev_day = _day;
+      }
+      // In the same day, just shift to next forecast
+      else
+      {
+        h++;
+      }
+    }
+
+    // Get the temperature and store it into the daily array
+    if (last_key == "temp")
+    {
+      Forecast5D[d].temp[h] = v.toFloat();
+    }
+
+    // Get the relative humidity and store it into the daily array
+    if (last_key == "humidity")
+    {
+      Forecast5D[d].humi[h] = v.toFloat();
+    }
+
+    // Get the icon for the forecast of the midday
+    if (last_key == "icon" && _hour == 12)
+    {
+      strcpy(Forecast5D[d].icon, v.c_str());
+    }
+  }
+
+  // Apparently, parsing too fast causes corrupted values, so let's add some slight delay
+  virtual void whitespace(char c)   { delay(5); }
+  virtual void startDocument()      { delay(5); last_key = ""; }
+  virtual void startObject()        { delay(5); last_key = ""; }
+  virtual void endObject()          { delay(5); last_key = ""; }
+  virtual void startArray()         { delay(5); last_key = ""; }
+  virtual void endArray()           { delay(5); last_key = ""; }
+  virtual void endDocument()        { delay(5); last_key = ""; }
+
+  int getCount() { return _count; }
+
+private:
+  String last_key;
+  int prev_day, _hour;
+  int d, h;
+  int _count;
+};
+
+// This function downloads the full 5-day forecast from OWM. Since it's too big to be parsed with ArduinoJson, we use a streaming parser library
+// that will do the parsing using the custom class here above while the data comes from the web server, with the lowest ram usage possible.
+void Get5DForecast()
+{
+  // Reset forecast memory
+  for (int d = 0; d<6; ++d)
+  {
+     // Fill with impossible temperature values in order to recognize empty fields
+    Forecast5D[d].tmin = 1000.f;
+    Forecast5D[d].tmax = 1000.f;
+    Forecast5D[d].avgh = 1000.f;
+    Forecast5D[d].nday = 0;
+    for (int h = 0; h<8; ++h)
+    {
+      Forecast5D[d].temp[h] = 1000.f;
+      Forecast5D[d].humi[h] = 1000.f;
+    }
+  }
+
+  // Initialize the JSON Streaming Parser
+  JsonStreamingParser parser;
+  OWMListener listener;
+  listener.Init();
+  parser.setListener(&listener);
+
+  tft.setFont();
+  tft.setTextColor(ILI9341_WHITE);
+  tft.setCursor(0, 10);
+
+  // Download the whole forecast (40 items, 8 a day for 5 days)
+  String WeatherURL = "/data/2.5/forecast?id=" + OWM_CITYID + "&units=metric&lang=it&APPID=" + OWM_APIKEY;
+
+  // Start HTTP connection
+  client.stop();
+  if (client.connect(WeatherServer, 80))
+  {
+    // Make a HTTP request:
+    String Query = String(
+      "GET " + WeatherURL + " HTTP/1.1" + CRLF +
+      "Host: " + String(WeatherServer) + ":80" + CRLF +
+      "Connection: close" + CRLF +
+      CRLF
+    );
+    client.print(Query);
+
+    // Wait for client, apply a timeout
+    unsigned long timeout = millis();
+    while (client.available() == 0)
+    {
+        if (millis() - timeout > 2000)
+        {
+            client.stop();
+            return;
+        }
+    }
+
+    // Skip response headers
+    client.find("\r\n\r\n");
+
+    while (client.available())
+      parser.parse((char)client.read());
+
+    // If the parsing fails, wait 3 seconds then retry...
+    if (listener.getCount() != 40)
+    {
+      tft.setFont();
+      tft.setTextColor(ILI9341_WHITE);
+      tft.setCursor(0, 140);
+      for (int s=0; s<30; ++s) { tft.print("."); delay(100); }
+      Get5DForecast();
+      return;
+    }
+
+    // Calculate daily min & max temperatures
+    // Also calculate daily average humidity
+    for (int d = 0; d<6; ++d)
+    {
+      float _min = 100.f, _max = -100.f;
+      float avg_humi = 0;
+      for (int h = 0; h<8; ++h)
+      {
+        if (Forecast5D[d].temp[h] == 1000.f) continue; // Ignore unexistant values
+        if (Forecast5D[d].temp[h] > _max) _max = Forecast5D[d].temp[h];
+        if (Forecast5D[d].temp[h] < _min) _min = Forecast5D[d].temp[h];
+
+        if (Forecast5D[d].humi[h] != 1000.f) avg_humi += Forecast5D[d].humi[h];
+      }
+
+      Forecast5D[d].tmin = _min;
+      Forecast5D[d].tmax = _max;
+      Forecast5D[d].avgh = avg_humi / 8.f;
+    }
+
+    Forecast5D[0].LastTimeUpdated = timeClient.getEpochTime();
+  }
+}
+
+void Show5DForecast()
+{
+  // Check if it's time to update the weather forecast
+  if (timeClient.getEpochTime() - Forecast5D[0].LastTimeUpdated >= OWM_UDPATE_FREQ)
+  {
+    tft.fillScreen(0);
+    tft.setFont(&FreeSans9pt7b);
+    tft.setTextColor(ILI9341_WHITE);
+    tft.setCursor(0, 120);
+    tft.print("Ricezione dati meteo..."); // "Download weather informations..."
+    Get5DForecast();
+  }
+
+  tft.fillScreen(0);
+  UpdateStatusBar();
+  char txt[8];
+
+  // Draw scale
+  tft.setTextColor(tft.color565(128, 128, 128));
+  tft.setFont();
+  for (int h=0; h<8; ++h)
+  {
+    int y = 80 + h * 20;
+    int g = 50 - h * 10;
+    tft.setCursor(10, y-3);
+    sprintf(txt, "%+02d", g);
+    tft.print(txt);
+    tft.drawLine(30, y, 320, y, tft.color565(80, 80, 80));
+  }
+
+  // Draw histograms
+  int ix = 0;
+  for (int d=0; d<6; ++d)
+  {
+    if (String(Forecast5D[d].icon) == "" || Forecast5D[d].tmin == 1000.f || Forecast5D[d].tmax == 1000.f)
+      continue;
+
+    int x = 40 + ix++ * 55;
+    int y1 = 180 - (int)Forecast5D[d].tmin * 2;
+    int y2 = 180 - (int)Forecast5D[d].tmax * 2;
+
+    // Draw icon...
+    tft.setTextColor(ILI9341_WHITE);
+    tft.setFont(&Meteocons_Regular_24);
+    tft.setCursor(x + 10, 70);
+    tft.print(GetWeatherIcon(Forecast5D[d].icon));
+
+    // Draw bars
+    tft.fillRect(x     , y2, 25, 230-y2, tft.color565(255,  64,  64)); // max
+    tft.fillRect(x + 25, y1, 25, 230-y1, tft.color565( 64,  64, 255)); // min
+
+    tft.setFont();
+
+    // Print max temperature
+    tft.setCursor(x, y2 + 2);
+    sprintf(txt, "%02.1f", Forecast5D[d].tmax);
+    tft.print(txt);
+
+    // Print min temperature
+    tft.setCursor(x+26, y1 + 3);
+    sprintf(txt, "%02.1f", Forecast5D[d].tmin);
+    tft.print(txt);
+
+    // Print himidity
+    tft.setTextColor(tft.color565(196, 196, 196));
+    tft.setCursor(x+1, y2 - 12);
+    sprintf(txt, "H:%02.1f%%", Forecast5D[d].avgh);
+    tft.print(txt);
+
+    // Print day
+    tft.setTextColor(ILI9341_WHITE);
+    sprintf(txt, "%s", days[Forecast5D[d].nday]);
+    tft.setCursor(x, 231);
+    tft.print(txt);
   }
 }
 
@@ -981,7 +1276,6 @@ void LoginPage()
     {
       x = c * 64;
       tft.fillRoundRect(x, y, 64-1, 64-1, 16, ILI9341_WHITE);
-      //tft.drawRoundRect(x, y, 64-1, 64-1, 16, ILI9341_PURPLE);
       tft.setCursor(x+18, y + 46);
       tft.print(n++);
     }
@@ -1019,7 +1313,6 @@ void UpdateThermostat(int redraw)
   }
 }
 
-
 void WiFiConnect()
 {
   tft.fillRect(0, 100, 320, 40, 0);
@@ -1050,6 +1343,7 @@ void setup()
   IdleTimer = 0;
   TempAverage.Init();
   HumiAverage.Init();
+
   pinMode(PIN_BEEPER, OUTPUT);
 
   // Init display
