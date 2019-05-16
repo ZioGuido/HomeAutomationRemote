@@ -990,6 +990,7 @@ void Get5DForecast()
     Forecast5D[d].tmax = 1000.f;
     Forecast5D[d].avgh = 1000.f;
     Forecast5D[d].nday = 0;
+    strcpy(Forecast5D[d].icon, "");
     for (int h = 0; h<8; ++h)
     {
       Forecast5D[d].temp[h] = 1000.f;
