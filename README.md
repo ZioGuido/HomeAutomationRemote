@@ -23,4 +23,9 @@ Requires:
 - Custom functions to operate remotely on your Home Automation System
 
 Video demonstration (shot before the 24H or 5-day forecast implementations):
+
 https://www.youtube.com/watch?v=KAljPA9jL0M
+
+Video of just the weather forecast functions:
+
+https://www.youtube.com/watch?v=jc8K5XfMf7A
